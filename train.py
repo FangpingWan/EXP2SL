@@ -163,7 +163,7 @@ n_rep = 5
 gene_list = np.load('./L1000/shrna_gene_list_'+tissue+'.npy')
 feature_list, feature_dict = load_feature_list(tissue, gene_list)
 
-symbolA_list, symbolB_list, labels = load_label(tissue, feature_dict, tag)
+symbolA_list, symbolB_list, labels = load_label(tissue, feature_dict)
 symbol_set = set(symbolA_list).union(set(symbolB_list))
 print 'number of unique genes with SL labels', len(symbol_set)
 
@@ -208,4 +208,4 @@ for rep_i in range(n_rep):
 
 auc_list = np.array(auc_list)
 print 'repeat avg', auc_list.shape, 'mean', np.mean(auc_list, axis=0), get_std(auc_list)
-np.save('./EXP2SL_'+tissue+'_'+split+'_'+str(a_semi_weight)+'_'+str(a_gnn_layer)+'_'+str(a_dim)+'_'+str(a_l2), auc_list)
+np.save('./EXP2SL_'+tissue+'_'+split+'_'+str(sw)+'_'+str(dnn_layer)+'_'+str(dim)+'_'+str(l2), auc_list)
