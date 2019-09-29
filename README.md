@@ -4,7 +4,7 @@
 Pytorch 1.0.1
 
 # How to run
-1. Download L1000 expression profiles (i.e., input features) from . Put it in folder L1000.
+1. Download L1000 expression profiles (i.e., input features) from https://drive.google.com/file/d/1lBJdTRSHtw16FIN45mmoEW-dJp53D2O4/view?usp=sharing. Put it in folder L1000.
 2. To reproduce our results, run the following command:
    <code>python train.py [cell_line] [test scenario] [semi-supervised loss weight] [dnn layer] [hidden dimension] [l2 weight]</code>
    
