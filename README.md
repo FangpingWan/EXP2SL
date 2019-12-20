@@ -2,7 +2,9 @@
 
 # Requirements
 Python 3.5 or above
+
 Pytorch 1.0.1
+
 Scikit-learn 0.19.0
 
 # How to run
