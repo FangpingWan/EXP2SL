@@ -27,7 +27,7 @@ Scikit-learn 0.19.0
    [n fold] should be a nonnegative integer represents the n-fold cross-validation you want to perform.
    
    [n repetition] should be a nonnegative integer represents the the number of repetition of cross validation under different random seeds you want to perform.
- 3. A two-column list of AUROC (first column) and AUPR (second column) of cross-validation will be saved. 
+ 3. A two-column list of AUROC (first column) and AUPR (second column) of cross-validation results will be saved. 
    
    
 # Contacts
