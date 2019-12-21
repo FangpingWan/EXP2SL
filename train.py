@@ -36,8 +36,9 @@ def load_label(tissue, feature_dict):
 			selected.add(symbolA+' ' +symbolB)
 		assert symbolB + ' ' + symbolA not in selected
 	f.close()
-	print 'number of samples', len(symbolA_list), len(symbolB_list), len(label_list)
-	print 'positive', np.sum(label_list), 'negative', len(label_list)-np.sum(label_list)
+	print ('number of samples', len(symbolA_list), len(symbolB_list), len(label_list))
+	print ('positive', np.sum(label_list), 'negative', len(label_list)-np.sum(label_list))
+
 	return np.array(symbolA_list), np.array(symbolB_list), np.array(label_list)
 
 
@@ -71,15 +72,19 @@ def get_sl_mat(symbolA_list, symbolB_list, labels, gene_list, feature_dict):
 	return sl_mat, sl_mask, sl_gene_set
 
 
-def train_test_split(sl_mat, sl_mask, fold):
+def train_test_split_fixseed(sl_mat, sl_mask, fold, start_seed):
+	seed = start_seed
 	all_idx = np.where(sl_mask==1)
 	idx = np.array(range(len(all_idx[0])))
 	
 	success = False
 	while not success:
 		success = True
+
+		np.random.seed(seed)
 		np.random.shuffle(idx)
-		kf = KFold(n_splits=fold, shuffle=True)
+		np.random.seed(seed)
+		kf = KFold(n_splits=fold, shuffle=True, random_state = seed)
 		train_mat_list, train_mask_list, test_mat_list, test_mask_list = [], [], [], []
 		for train_i, test_i in kf.split(idx):
 			train_mat = np.zeros(sl_mat.shape, dtype=sl_mat.dtype)
@@ -90,27 +95,33 @@ def train_test_split(sl_mat, sl_mask, fold):
 			train_mask[all_idx[0][train_i], all_idx[1][train_i] ] = 1
 			test_mat[all_idx[0][test_i], all_idx[1][test_i] ] = sl_mat[all_idx[0][test_i], all_idx[1][test_i] ]
 			test_mask[all_idx[0][test_i], all_idx[1][test_i] ] = 1
-			print 'train-test split', 'train', train_mat.shape, train_mat.sum(), train_mask.sum(), 'test', test_mat.shape, test_mat.sum(), test_mask.sum()
+			print ('train-test split', 'train', train_mat.shape, train_mat.sum(), train_mask.sum(), 'test', test_mat.shape, test_mat.sum(), test_mask.sum())
 			if train_mat.sum() == 0 or train_mat.sum() == train_mask.sum() or test_mat.sum() == 0 or test_mat.sum() == test_mask.sum():
 				success = False
-				print 're-splitting....'
+				seed += 1
+				print ('re-splitting....')
 				break
 			train_mat_list.append(train_mat+train_mat.transpose())
 			train_mask_list.append(train_mask+train_mask.transpose())
 			test_mat_list.append(test_mat+test_mat.transpose())
 			test_mask_list.append(test_mask+test_mask.transpose())
-	return train_mat_list, train_mask_list, test_mat_list, test_mask_list
+	seed += 1
+	return train_mat_list, train_mask_list, test_mat_list, test_mask_list, seed
 
 
-def leave_gene_split(sl_mat, sl_mask, fold):
+def leave_gene_split_fixseed(sl_mat, sl_mask, fold, start_seed):
+	seed = start_seed
+
 	all_idx = np.where(sl_mask==1)
 	idx = np.array(range(sl_mat.shape[0]))
 	
 	success = False
 	while not success:
 		success = True
+		np.random.seed(seed)
 		np.random.shuffle(idx)
-		kf = KFold(n_splits=fold, shuffle=True)
+		np.random.seed(seed)
+		kf = KFold(n_splits=fold, shuffle=True, random_state = seed)
 		train_mat_list, train_mask_list, test_mat_list, test_mask_list = [], [], [], []
 		for train_i, test_i in kf.split(idx):
 			train_i_ = idx[train_i]
@@ -131,17 +142,19 @@ def leave_gene_split(sl_mat, sl_mask, fold):
 					test_mat[x_i, y_i] = sl_mat[x_i, y_i]
 					test_mask[x_i, y_i] = 1
 				else:
-					print 'error'
-			print 'train-test split', 'train', train_mat.shape, train_mat.sum(), train_mask.sum(), 'test', test_mat.shape, test_mat.sum(), test_mask.sum()
+					print ('error')
+			print ('train-test split', 'train', train_mat.shape, train_mat.sum(), train_mask.sum(), 'test', test_mat.shape, test_mat.sum(), test_mask.sum())
 			if train_mat.sum() == 0 or train_mat.sum() == train_mask.sum() or test_mat.sum() == 0 or test_mat.sum() == test_mask.sum():
 				success = False
-				print 're-splitting....'
+				seed += 1
+				print ('re-splitting....')
 				break
 			train_mat_list.append(train_mat+train_mat.transpose())
 			train_mask_list.append(train_mask+train_mask.transpose())
 			test_mat_list.append(test_mat+test_mat.transpose())
 			test_mask_list.append(test_mask+test_mask.transpose())
-	return train_mat_list, train_mask_list, test_mat_list, test_mask_list
+	seed += 1
+	return train_mat_list, train_mask_list, test_mat_list, test_mask_list, seed
 
 def masked_auc(test_mat, test_mask, test_pred):
 	test_idx = np.where(test_mask==1)
@@ -155,7 +168,7 @@ def masked_auc(test_mat, test_mask, test_pred):
 
 tissue = sys.argv[1]
 split = sys.argv[2]
-print 'tissue', tissue, 'split', split
+print ('tissue', tissue, 'split', split)
 
 n_fold = 5
 n_rep = 5
@@ -165,13 +178,13 @@ feature_list, feature_dict = load_feature_list(tissue, gene_list)
 
 symbolA_list, symbolB_list, labels = load_label(tissue, feature_dict)
 symbol_set = set(symbolA_list).union(set(symbolB_list))
-print 'number of unique genes with SL labels', len(symbol_set)
+print ('number of unique genes with SL labels', len(symbol_set))
 
 sl_mat, sl_mask, sl_gene_set = get_sl_mat(symbolA_list, symbolB_list, labels, gene_list, feature_dict)
-print 'sl_mat', sl_mat.shape, sl_mat.sum(), sl_mask.sum()
+print ('sl_mat', sl_mat.shape, sl_mat.sum(), sl_mask.sum())
 
 initial_gene_features = np.array([feature_dict[gene] for gene in gene_list])
-print 'initial_gene_features', initial_gene_features.shape
+print ('initial_gene_features', initial_gene_features.shape)
 
 sw = sys.argv[3]
 dnn_layer = sys.argv[4]
@@ -180,32 +193,33 @@ l2 = sys.argv[6]
 
 
 
-print '='*30
-print 'tissue', tissue, 'split', split
+print ('='*30)
+print ('tissue', tissue, 'split', split)
 				
 auc_list = []
+seed = 0
 for rep_i in range(n_rep):
 	if split == 'edge':
-		train_mat_list, train_mask_list, test_mat_list, test_mask_list  = train_test_split(sl_mat, sl_mask, n_fold)  # random split
+		train_mat_list, train_mask_list, test_mat_list, test_mask_list, seed  = train_test_split_fixseed(sl_mat, sl_mask, n_fold, seed)  # random split
 	elif split == 'gene':
-		train_mat_list, train_mask_list, test_mat_list, test_mask_list = leave_gene_split(sl_mat, sl_mask, n_fold)
+		train_mat_list, train_mask_list, test_mat_list, test_mask_list, seed = leave_gene_split_fixseed(sl_mat, sl_mask, n_fold, seed)
 	
 	for fold_i in range(n_fold):
-		print 'repeat', rep_i, 'fold', fold_i
+		print ('repeat', rep_i, 'fold', fold_i)
 		train_mat, train_mask, test_mat, test_mask = train_mat_list[fold_i], train_mask_list[fold_i], test_mat_list[fold_i], test_mask_list[fold_i]
-		print 'train_mat', train_mat.shape, train_mask.sum(), 'test_mat', test_mat.shape, test_mask.sum()
+		print ('train_mat', train_mat.shape, train_mask.sum(), 'test_mat', test_mat.shape, test_mask.sum())
 		model = DeepModel(initial_gene_features, float(sw), int(dnn_layer), int(dim), float(l2), n_epoch=1000, n_ensemble=1)
 		model.fit(train_mat, train_mask, test_mat, test_mask)
 		
 		test_pred = model.predict(train_mat, train_mask, test_mask)
-		print 'test_pred', test_pred.shape
+		print ('test_pred', test_pred.shape)
 		test_label = test_mat[np.where(test_mask==1)]
 		auc = roc_auc_score(test_label.reshape(-1), test_pred.reshape(-1))
 		aupr = average_precision_score(test_label.reshape(-1), test_pred.reshape(-1))
 		#auc, aupr = masked_auc(test_mat, test_mask, test_pred)
-		print 'model auc, aupr', auc, aupr
+		print ('model auc, aupr', auc, aupr)
 		auc_list.append([auc, aupr])
 
 auc_list = np.array(auc_list)
-print 'repeat avg', auc_list.shape, 'mean', np.mean(auc_list, axis=0), get_std(auc_list)
+print ('repeat avg', auc_list.shape, 'mean', np.mean(auc_list, axis=0), get_std(auc_list))
 np.save('./EXP2SL_'+tissue+'_'+split+'_'+str(sw)+'_'+str(dnn_layer)+'_'+str(dim)+'_'+str(l2), auc_list)
