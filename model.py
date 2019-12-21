@@ -1,225 +1,194 @@
 import numpy as np
 import pickle
-import sys
-from sklearn.model_selection import KFold, StratifiedKFold
-from scipy.spatial.distance import jaccard
-from github_model import *
+import time
+
+import torch
+from torch import nn
+import torch.optim as optim
+import torch.nn.functional as F
+from torch.autograd import Variable
+from torch.nn.utils import weight_norm
 from sklearn.metrics import roc_auc_score, average_precision_score
-#tissue_set = {'A375', 'A549', 'HEK', 'HT29'}
 
-def get_std(scores):
-    fold_avg = []
-    for i in range(5):
-        fold_score = scores[i*5:(i+1)*5]
-        fold_avg.append(np.mean(fold_score, axis=0))
-    fold_avg = np.array(fold_avg)
-    return np.std(fold_avg, axis=0)
-    
-def load_label(tissue, feature_dict):
-	symbolA_list, symbolB_list, label_list = [], [], []
-	selected = set()
-	pos_gene = set()
-	f = open('./GEMINI/gemini_'+tissue+'_labels.tsv')
-	for line in f.readlines():
-		symbolA, geneA, symbolB, geneB, label = line.strip().split('\t')
-		if symbolA not in feature_dict or symbolB not in feature_dict:
-			continue
-		if label == '1':
-			pos_gene.add(geneA)
-			pos_gene.add(geneB)
-		else:
-			pass
-		if symbolA+' ' +symbolB not in selected:
-			symbolA_list.append(symbolA)
-			symbolB_list.append(symbolB)
-			label_list.append(int(label))
-			selected.add(symbolA+' ' +symbolB)
-		assert symbolB + ' ' + symbolA not in selected
-	f.close()
-	print ('number of samples', len(symbolA_list), len(symbolB_list), len(label_list))
-	print ('positive', np.sum(label_list), 'negative', len(label_list)-np.sum(label_list))
+class Rank_Loss2(nn.Module):
+	def __init__(self):
+		super(Rank_Loss2, self).__init__()
+		self.criterion = nn.BCELoss(reduce=False)
+		self.MSEcriterion = nn.MSELoss(reduce=False)
+	def forward(self, output_pos, output_neg, output_neg_sampled, output_unknown, semi_weight):
+		label_pos = 1*torch.ones(output_pos.size()).cuda()
+		loss_pos = self.MSEcriterion((output_pos), label_pos)
+		label_neg = -1*torch.ones(output_neg.size()).cuda()
+		loss_neg = self.MSEcriterion((output_neg), label_neg)
+		loss = torch.sum(loss_pos) + torch.sum(loss_neg) 
 
-	return np.array(symbolA_list), np.array(symbolB_list), np.array(label_list)
+		un_score = torch.sigmoid(output_unknown - output_neg_sampled)
+		pu_score = torch.sigmoid(output_pos - output_unknown)
+		label = torch.ones(un_score.size()).cuda()
+		loss += semi_weight*(torch.sum(self.criterion(un_score, label)) + torch.sum(self.criterion(pu_score, label)))
+		return loss
 
 
-def load_feature_list(tissue, gene_list):
-	if tissue == 'HEK':
-		tissue = 'HEK293T'
-	with open('./L1000/shRNA_cgs') as f:
-		shrna_dict = pickle.load(f)
-	feature_dict = {}
-	for symbol, t in shrna_dict.keys():
-		if t == tissue:
-			feature_dict[symbol] = shrna_dict[(symbol,t)]
-	feature_list = [feature_dict[gene] for gene in gene_list]
-	return np.array(feature_list), feature_dict
+class Net(nn.Module):
+	def __init__(self, init_features, dnn_layers, dim):
+		super(Net, self).__init__()
+		self.init_features = torch.Tensor(init_features).cuda()
+		self.dim = dim #hidden_size
+		self.dnn_layers = dnn_layers #dnn_layers
+		self.MLP1 = nn.Linear(978, self.dim)
+		self.MLP2 = nn.ModuleList([nn.Linear(self.dim, self.dim) for i in range(self.dnn_layers)])
+		self.LR = nn.Linear(2*self.dim, 1)
+
+	def forward(self, train_mat, pos_idx, neg_all_idx, unknown_all_idx, test_idx, epoch):
+		#n_gene = self.init_features.size(0)
+		time0 = time.time()
+
+		gene_features = self.init_features
+		
+		gene_features = F.relu(self.MLP1(gene_features))
+		for i in range(self.dnn_layers):
+			gene_features = F.relu(self.MLP2[i](gene_features))
+
+		# get_index
+		time1 = time.time()
+		n_pos = len(pos_idx[0])
+		neg_sampled = np.random.choice(range(neg_all_idx.shape[1]), n_pos, replace=True)
+		neg_all = np.random.choice(range(neg_all_idx.shape[1]), neg_all_idx.shape[1], replace=False)
+		#neg_idx = neg_all_idx
+		neg_idx_sampled = (neg_all_idx[0][neg_sampled], neg_all_idx[1][neg_sampled])
+		neg_idx = (neg_all_idx[0][neg_all], neg_all_idx[1][neg_all])
+		unknown_sampled = range(epoch*n_pos, (epoch+1)*n_pos)  #np.random.choice(range(unknown_all_idx.shape[1]), len(pos_idx[0]), replace=True)
+		unknown_idx = (unknown_all_idx[0][unknown_sampled], unknown_all_idx[1][unknown_sampled])
+		
+		time2 = time.time()
+		
+		sl_pos_left = gene_features[pos_idx[0].tolist()+pos_idx[1].tolist()]
+		sl_pos_right = gene_features[pos_idx[1].tolist()+pos_idx[0].tolist()]
+		sl_neg_left = gene_features[neg_idx[0].tolist()+neg_idx[1].tolist()]
+		sl_neg_right = gene_features[neg_idx[1].tolist()+neg_idx[0].tolist()]
+		sl_neg_left_sampled = gene_features[neg_idx_sampled[0].tolist()+neg_idx_sampled[1].tolist()]
+		sl_neg_right_sampled = gene_features[neg_idx_sampled[1].tolist()+neg_idx_sampled[0].tolist()]
 
 
-def get_sl_mat(symbolA_list, symbolB_list, labels, gene_list, feature_dict):
-	gene_to_idx = {gene_list[i]:i for i in range(len(gene_list))}
-	sl_mat = np.zeros((len(gene_list), len(gene_list)))
-	sl_mask = np.zeros((len(gene_list), len(gene_list)))
-	sl_gene_set = set()
-	for i in range(len(symbolA_list)):
-		geneA = symbolA_list[i]
-		geneB = symbolB_list[i]
-		if geneA not in gene_to_idx or geneB not in gene_to_idx:
-			continue
-		sl_mat[gene_to_idx[geneA], gene_to_idx[geneB]] = labels[i]
-		sl_mask[gene_to_idx[geneA], gene_to_idx[geneB]] = 1
-		sl_gene_set.add(geneA)
-		sl_gene_set.add(geneB)
-	return sl_mat, sl_mask, sl_gene_set
+		sl_unknown_left = gene_features[unknown_idx[0].tolist()+unknown_idx[1].tolist()]
+		sl_unknown_right = gene_features[unknown_idx[1].tolist()+unknown_idx[0].tolist()]
+		sl_test_left = gene_features[test_idx[0].tolist()+test_idx[1].tolist()]
+		sl_test_right = gene_features[test_idx[1].tolist()+test_idx[0].tolist()]
+		
+		time3 = time.time()
+		
+
+		concat_pos = torch.cat((sl_pos_left, sl_pos_right), dim=1)
+		concat_neg = torch.cat((sl_neg_left, sl_neg_right), dim=1)
+		concat_neg_sampled = torch.cat((sl_neg_left_sampled, sl_neg_right_sampled), dim=1)
+		concat_unknown = torch.cat((sl_unknown_left, sl_unknown_right),dim=1)
+		concat_test = torch.cat((sl_test_left, sl_test_right), dim=1)
+
+		output_pos = self.LR(concat_pos)
+		output_neg = self.LR(concat_neg)
+		output_neg_sampled = self.LR(concat_neg_sampled)
+		output_unknown = self.LR(concat_unknown)
+		output_test = self.LR(concat_test)
+
+		output_test_size = output_pos.size(0)/2
+		output_pos = 0.5*(output_pos[:output_test_size] + output_pos[output_test_size:])
+
+		output_test_size = output_neg.size(0)/2
+		output_neg = 0.5*(output_neg[:output_test_size] + output_neg[output_test_size:])
+
+		output_test_size = output_neg_sampled.size(0)/2
+		output_neg_sampled = 0.5*(output_neg_sampled[:output_test_size] + output_neg_sampled[output_test_size:])
+		
+		output_test_size = output_unknown.size(0)/2
+		output_unknown = 0.5*(output_unknown[:output_test_size] + output_unknown[output_test_size:])
 
 
-def train_test_split_fixseed(sl_mat, sl_mask, fold, start_seed):
-	seed = start_seed
-	all_idx = np.where(sl_mask==1)
-	idx = np.array(range(len(all_idx[0])))
+		output_test_size = output_test.size(0)/2
+		output_test = 0.5*(output_test[:output_test_size] + output_test[output_test_size:])
+
+		time4 = time.time()
+		return output_pos, output_neg, output_neg_sampled, output_unknown, output_test
+
+
+class DeepModel():
+	def __init__(self, initial_gene_features, semi_weight, dnn_layers, dim, l2, n_epoch, n_ensemble=1):
+		#self.batch_size = batch_size
+		self.n_ensemble = n_ensemble
+		self.n_epoch = n_epoch
+		self.model_list = []
+		self.l2 = l2
+		self.semi_weight = semi_weight
+		for ensemble in range(self.n_ensemble):
+			model = Net(initial_gene_features, dnn_layers, dim)
+			model.cuda()
+			self.model_list.append(model)
 	
-	success = False
-	while not success:
-		success = True
-
-		np.random.seed(seed)
-		np.random.shuffle(idx)
-		np.random.seed(seed)
-		kf = KFold(n_splits=fold, shuffle=True, random_state = seed)
-		train_mat_list, train_mask_list, test_mat_list, test_mask_list = [], [], [], []
-		for train_i, test_i in kf.split(idx):
-			train_mat = np.zeros(sl_mat.shape, dtype=sl_mat.dtype)
-			train_mask = np.zeros(sl_mat.shape, dtype=sl_mat.dtype)
-			test_mat = np.zeros(sl_mat.shape, dtype=sl_mat.dtype)
-			test_mask = np.zeros(sl_mat.shape, dtype=sl_mat.dtype)
-			train_mat[all_idx[0][train_i], all_idx[1][train_i] ] = sl_mat[all_idx[0][train_i], all_idx[1][train_i] ]
-			train_mask[all_idx[0][train_i], all_idx[1][train_i] ] = 1
-			test_mat[all_idx[0][test_i], all_idx[1][test_i] ] = sl_mat[all_idx[0][test_i], all_idx[1][test_i] ]
-			test_mask[all_idx[0][test_i], all_idx[1][test_i] ] = 1
-			print ('train-test split', 'train', train_mat.shape, train_mat.sum(), train_mask.sum(), 'test', test_mat.shape, test_mat.sum(), test_mask.sum())
-			if train_mat.sum() == 0 or train_mat.sum() == train_mask.sum() or test_mat.sum() == 0 or test_mat.sum() == test_mask.sum():
-				success = False
-				seed += 1
-				print ('re-splitting....')
-				break
-			train_mat_list.append(train_mat+train_mat.transpose())
-			train_mask_list.append(train_mask+train_mask.transpose())
-			test_mat_list.append(test_mat+test_mat.transpose())
-			test_mask_list.append(test_mask+test_mask.transpose())
-	seed += 1
-	return train_mat_list, train_mask_list, test_mat_list, test_mask_list, seed
-
-
-def leave_gene_split_fixseed(sl_mat, sl_mask, fold, start_seed):
-	seed = start_seed
-
-	all_idx = np.where(sl_mask==1)
-	idx = np.array(range(sl_mat.shape[0]))
+	def fit(self, train_mat, train_mask, test_mat, test_mask):
+		i = 0
+		# get_index
+		unknown_mask = np.ones(train_mask.shape) - train_mask - test_mask
+		
+		pos_idx = np.array(np.where(train_mat != 0))
+		neg_all_idx = np.array(np.where( (train_mask-train_mat) != 0))
+		unknown_all_idx = np.array(np.where(unknown_mask != 0))
+		shuffle_unknown = np.array(range(unknown_all_idx.shape[1]))
+		np.random.shuffle(shuffle_unknown)
+		unknown_all_idx = unknown_all_idx[:, shuffle_unknown]
+		unknown_all_idx = np.hstack([unknown_all_idx, unknown_all_idx, unknown_all_idx, unknown_all_idx, unknown_all_idx])
+		test_idx = np.array(np.where(test_mask != 0))
+		print ('pos_idx', pos_idx.shape, 'neg_all_idx', neg_all_idx.shape, 'unknown_all_idx', unknown_all_idx.shape, 'test_idx',test_idx.shape)
+		
+		train_mat = torch.Tensor(train_mat).cuda()
+		train_mask = torch.Tensor(train_mask).cuda()
+		for model in self.model_list:
+			i += 1
+			print ('ensemble', i)
+			self.fit_single_mode(train_mat, train_mask, model, test_mat, test_mask, pos_idx, neg_all_idx, unknown_all_idx, test_idx)
 	
-	success = False
-	while not success:
-		success = True
-		np.random.seed(seed)
-		np.random.shuffle(idx)
-		np.random.seed(seed)
-		kf = KFold(n_splits=fold, shuffle=True, random_state = seed)
-		train_mat_list, train_mask_list, test_mat_list, test_mask_list = [], [], [], []
-		for train_i, test_i in kf.split(idx):
-			train_i_ = idx[train_i]
-			test_i_ = idx[test_i]
-			train_mat = np.zeros(sl_mat.shape, dtype=sl_mat.dtype)
-			train_mask = np.zeros(sl_mat.shape, dtype=sl_mat.dtype)
-			test_mat = np.zeros(sl_mat.shape, dtype=sl_mat.dtype)
-			test_mask = np.zeros(sl_mat.shape, dtype=sl_mat.dtype)
-			
-			for i in range(len(all_idx[0])):
-				x_i = all_idx[0][i]
-				y_i = all_idx[1][i]
-				
-				if x_i in train_i_ and y_i in train_i_:
-					train_mat[x_i, y_i] = sl_mat[x_i, y_i]
-					train_mask[x_i, y_i] = 1
-				elif x_i in test_i_ or y_i in test_i_:
-					test_mat[x_i, y_i] = sl_mat[x_i, y_i]
-					test_mask[x_i, y_i] = 1
-				else:
-					print ('error')
-			print ('train-test split', 'train', train_mat.shape, train_mat.sum(), train_mask.sum(), 'test', test_mat.shape, test_mat.sum(), test_mask.sum())
-			if train_mat.sum() == 0 or train_mat.sum() == train_mask.sum() or test_mat.sum() == 0 or test_mat.sum() == test_mask.sum():
-				success = False
-				seed += 1
-				print ('re-splitting....')
-				break
-			train_mat_list.append(train_mat+train_mat.transpose())
-			train_mask_list.append(train_mask+train_mask.transpose())
-			test_mat_list.append(test_mat+test_mat.transpose())
-			test_mask_list.append(test_mask+test_mask.transpose())
-	seed += 1
-	return train_mat_list, train_mask_list, test_mat_list, test_mask_list, seed
+	def fit_single_mode(self, train_mat, train_mask, model, test_mat, test_mask, pos_idx, neg_all_idx, unknown_all_idx, test_idx):
+		optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=0.001, weight_decay=self.l2, amsgrad=False)
+		scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=3000, gamma=0.5)
+		criterion1 = Rank_Loss2()
+		for epoch in range(self.n_epoch):
+			#scheduler.step()
+			optimizer.zero_grad()
+			output_pos, output_neg, output_neg_sampled, output_unknown, output_test = model(train_mat, pos_idx, neg_all_idx, unknown_all_idx, test_idx, epoch)
+	
+			loss = criterion1(output_pos, output_neg, output_neg_sampled, output_unknown, self.semi_weight)
+			total_loss = float(loss.data)
+			loss.backward()
+			nn.utils.clip_grad_norm_(model.parameters(), 5)
+			optimizer.step()
+			if epoch % 50 == 0:
+				test_label = test_mat[np.where(test_mask==1)]
+				auc = roc_auc_score(test_label.reshape(-1), output_test.cpu().detach().numpy().reshape(-1))
+				aupr = average_precision_score(test_label.reshape(-1), output_test.cpu().detach().numpy().reshape(-1))
+				print ('epoch', epoch, 'total_loss', total_loss, 'test auc', auc, 'test aupr', aupr)
+
+	def predict(self, train_mat, train_mask, test_mask):		
+		pos_idx = np.array(np.where(train_mat != 0))
+		neg_all_idx = np.array(np.where( (train_mask-train_mat) != 0))
+		unknown_all_idx = pos_idx#neg_all_idx #np.array(range(len(pos_idx)))#
+		test_idx = np.array(np.where(test_mask != 0))
+
+		train_mat = torch.Tensor(train_mat).cuda()
+
+		ensemble_sl_pred = None
+		for model in self.model_list:
+			output_pos, output_neg, output_neg_sampled, output_unknown, output_test = \
+			model(train_mat, pos_idx, neg_all_idx, unknown_all_idx, test_idx, 0)
+			if ensemble_sl_pred is None:
+				ensemble_sl_pred = output_test.cpu().detach().numpy()
+			else:
+				ensemble_sl_pred += output_test.cpu().detach().numpy()
+		return  ensemble_sl_pred/self.n_ensemble
 
 def masked_auc(test_mat, test_mask, test_pred):
 	test_idx = np.where(test_mask==1)
 	test_label = test_mat[test_idx]
-	pred =test_pred[test_idx]
-	#print 'test_label', test_label.shape, 'pred', pred.shape
-	return roc_auc_score(test_label, pred), average_precision_score(test_label, pred)
+	pred = test_pred[test_idx]
+	print ('test_label', test_label.shape, 'pred', pred.shape)
 
-# main
-
-
-tissue = sys.argv[1]
-split = sys.argv[2]
-print ('tissue', tissue, 'split', split)
-
-n_fold = int(sys.argv[7])
-n_rep = int(sys.argv[8])
-
-gene_list = np.load('./L1000/shrna_gene_list_'+tissue+'.npy')
-feature_list, feature_dict = load_feature_list(tissue, gene_list)
-
-symbolA_list, symbolB_list, labels = load_label(tissue, feature_dict)
-symbol_set = set(symbolA_list).union(set(symbolB_list))
-print ('number of unique genes with SL labels', len(symbol_set))
-
-sl_mat, sl_mask, sl_gene_set = get_sl_mat(symbolA_list, symbolB_list, labels, gene_list, feature_dict)
-print ('sl_mat', sl_mat.shape, sl_mat.sum(), sl_mask.sum())
-
-initial_gene_features = np.array([feature_dict[gene] for gene in gene_list])
-print ('initial_gene_features', initial_gene_features.shape)
-
-sw = sys.argv[3]
-dnn_layer = sys.argv[4]
-dim = sys.argv[5]
-l2 = sys.argv[6]
-
-
-
-print ('='*30)
-print ('tissue', tissue, 'split', split)
-				
-auc_list = []
-seed = 0
-for rep_i in range(n_rep):
-	if split == 'edge':
-		train_mat_list, train_mask_list, test_mat_list, test_mask_list, seed  = train_test_split_fixseed(sl_mat, sl_mask, n_fold, seed)  # random split
-	elif split == 'gene':
-		train_mat_list, train_mask_list, test_mat_list, test_mask_list, seed = leave_gene_split_fixseed(sl_mat, sl_mask, n_fold, seed)
+	return roc_auc_score(test_label, pred)
 	
-	for fold_i in range(n_fold):
-		print ('repeat', rep_i, 'fold', fold_i)
-		train_mat, train_mask, test_mat, test_mask = train_mat_list[fold_i], train_mask_list[fold_i], test_mat_list[fold_i], test_mask_list[fold_i]
-		print ('train_mat', train_mat.shape, train_mask.sum(), 'test_mat', test_mat.shape, test_mask.sum())
-		model = DeepModel(initial_gene_features, float(sw), int(dnn_layer), int(dim), float(l2), n_epoch=1000, n_ensemble=1)
-		model.fit(train_mat, train_mask, test_mat, test_mask)
-		
-		test_pred = model.predict(train_mat, train_mask, test_mask)
-		print ('test_pred', test_pred.shape)
-		test_label = test_mat[np.where(test_mask==1)]
-		auc = roc_auc_score(test_label.reshape(-1), test_pred.reshape(-1))
-		aupr = average_precision_score(test_label.reshape(-1), test_pred.reshape(-1))
-		#auc, aupr = masked_auc(test_mat, test_mask, test_pred)
-		print ('model auc, aupr', auc, aupr)
-		auc_list.append([auc, aupr])
-
-auc_list = np.array(auc_list)
-print ('repeat avg', auc_list.shape, 'mean', np.mean(auc_list, axis=0), get_std(auc_list))
-np.save('./EXP2SL_'+tissue+'_'+split+'_'+str(sw)+'_'+str(dnn_layer)+'_'+str(dim)+'_'+str(l2), auc_list)
+	
