@@ -136,13 +136,13 @@ class DeepModel():
 		unknown_all_idx = unknown_all_idx[:, shuffle_unknown]
 		unknown_all_idx = np.hstack([unknown_all_idx, unknown_all_idx, unknown_all_idx, unknown_all_idx, unknown_all_idx])
 		test_idx = np.array(np.where(test_mask != 0))
-		print 'pos_idx', pos_idx.shape, 'neg_all_idx', neg_all_idx.shape, 'unknown_all_idx', unknown_all_idx.shape, 'test_idx',test_idx.shape
+		print ('pos_idx', pos_idx.shape, 'neg_all_idx', neg_all_idx.shape, 'unknown_all_idx', unknown_all_idx.shape, 'test_idx',test_idx.shape)
 		
 		train_mat = torch.Tensor(train_mat).cuda()
 		train_mask = torch.Tensor(train_mask).cuda()
 		for model in self.model_list:
 			i += 1
-			print 'ensemble', i
+			print ('ensemble', i)
 			self.fit_single_mode(train_mat, train_mask, model, test_mat, test_mask, pos_idx, neg_all_idx, unknown_all_idx, test_idx)
 	
 	def fit_single_mode(self, train_mat, train_mask, model, test_mat, test_mask, pos_idx, neg_all_idx, unknown_all_idx, test_idx):
@@ -163,7 +163,7 @@ class DeepModel():
 				test_label = test_mat[np.where(test_mask==1)]
 				auc = roc_auc_score(test_label.reshape(-1), output_test.cpu().detach().numpy().reshape(-1))
 				aupr = average_precision_score(test_label.reshape(-1), output_test.cpu().detach().numpy().reshape(-1))
-				print 'epoch', epoch, 'total_loss', total_loss, 'test auc', auc, 'test aupr', aupr
+				print ('epoch', epoch, 'total_loss', total_loss, 'test auc', auc, 'test aupr', aupr)
 
 	def predict(self, train_mat, train_mask, test_mask):		
 		pos_idx = np.array(np.where(train_mat != 0))
@@ -187,7 +187,8 @@ def masked_auc(test_mat, test_mask, test_pred):
 	test_idx = np.where(test_mask==1)
 	test_label = test_mat[test_idx]
 	pred = test_pred[test_idx]
-	print 'test_label', test_label.shape, 'pred', pred.shape
+	print ('test_label', test_label.shape, 'pred', pred.shape)
+
 	return roc_auc_score(test_label, pred)
 	
 	
