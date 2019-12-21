@@ -3,9 +3,8 @@ import pickle
 import sys
 from sklearn.model_selection import KFold, StratifiedKFold
 from scipy.spatial.distance import jaccard
-from model import *
+from github_model import *
 from sklearn.metrics import roc_auc_score, average_precision_score
-#tissue_set = {'A375', 'A549', 'HEK', 'HT29'}
 
 def get_std(scores):
     fold_avg = []
@@ -170,8 +169,8 @@ tissue = sys.argv[1]
 split = sys.argv[2]
 print ('tissue', tissue, 'split', split)
 
-n_fold = 5
-n_rep = 5
+n_fold = int(sys.argv[7])
+n_rep = int(sys.argv[8])
 
 gene_list = np.load('./L1000/shrna_gene_list_'+tissue+'.npy')
 feature_list, feature_dict = load_feature_list(tissue, gene_list)
@@ -222,4 +221,6 @@ for rep_i in range(n_rep):
 
 auc_list = np.array(auc_list)
 print ('repeat avg', auc_list.shape, 'mean', np.mean(auc_list, axis=0), get_std(auc_list))
-np.save('./EXP2SL_'+tissue+'_'+split+'_'+str(sw)+'_'+str(dnn_layer)+'_'+str(dim)+'_'+str(l2), auc_list)
+#np.savetxt('./EXP2SL_'+tissue+'_'+split+'_'+str(sw)+'_'+str(dnn_layer)+'_'+str(dim)+'_'+str(l2), auc_list)
+
+np.savetxt('./EXP2SL_'+tissue+'_cv_results.txt', auc_list)
