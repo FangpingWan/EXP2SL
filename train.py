@@ -3,16 +3,10 @@ import pickle
 import sys
 from sklearn.model_selection import KFold, StratifiedKFold
 from scipy.spatial.distance import jaccard
-from github_model import *
+from model import *
 from sklearn.metrics import roc_auc_score, average_precision_score
+#tissue_set = {'A375', 'A549', 'HEK', 'HT29'}
 
-def get_std(scores):
-    fold_avg = []
-    for i in range(5):
-        fold_score = scores[i*5:(i+1)*5]
-        fold_avg.append(np.mean(fold_score, axis=0))
-    fold_avg = np.array(fold_avg)
-    return np.std(fold_avg, axis=0)
     
 def load_label(tissue, feature_dict):
 	symbolA_list, symbolB_list, label_list = [], [], []
